@@ -2,12 +2,13 @@ use quote::ToTokens;
 use std::collections::HashSet;
 use std::str::FromStr;
 use std::{collections::HashMap, convert::TryFrom};
+use syn::{Expr, ExprLit, Lit, TypeArray};
 use thiserror::Error;
 
 use crate::language::SupportedLanguage;
 
 /// Identifier used in Rust structs, enums, and fields. It includes the `original` name and the `renamed` value after the transformation based on `serde` attributes.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Id {
     /// The original identifier name
     pub original: String,
@@ -28,7 +29,7 @@ impl std::fmt::Display for Id {
 }
 
 /// Rust struct.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct RustStruct {
     /// The identifier for the struct.
     pub id: Id,
@@ -48,7 +49,7 @@ pub struct RustStruct {
 /// ```
 /// pub struct MasterPassword(String);
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct RustTypeAlias {
     /// The identifier for the alias.
     pub id: Id,
@@ -61,7 +62,7 @@ pub struct RustTypeAlias {
 }
 
 /// Rust field definition.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct RustField {
     /// Identifier for the field.
     pub id: Id,
@@ -114,6 +115,8 @@ pub enum RustType {
 pub enum SpecialRustType {
     /// Represents `Vec<T>` from the standard library
     Vec(Box<RustType>),
+    /// Represents `[T; N]` from the standard library
+    Array(Box<RustType>, usize),
     /// Represents `HashMap<K, V>` from the standard library
     HashMap(Box<RustType>, Box<RustType>),
     /// Represents `Option<T>` from the standard library
@@ -163,6 +166,8 @@ pub enum RustTypeParseError {
     UnexpectedToken(String),
     #[error("Tuples are not allowed in typeshare types")]
     UnexpectedParameterizedTuple,
+    #[error("Could not parse numeric literal")]
+    NumericLiteral(syn::parse::Error),
 }
 
 impl FromStr for RustType {
@@ -244,6 +249,20 @@ impl TryFrom<&syn::Type> for RustType {
                     }
                 }
             }
+            syn::Type::Array(TypeArray {
+                elem,
+                len:
+                    Expr::Lit(ExprLit {
+                        lit: Lit::Int(count),
+                        ..
+                    }),
+                ..
+            }) => Self::Special(SpecialRustType::Array(
+                Self::try_from(elem.as_ref())?.into(),
+                count
+                    .base10_parse()
+                    .map_err(RustTypeParseError::NumericLiteral)?,
+            )),
             _ => {
                 return Err(RustTypeParseError::UnexpectedToken(
                     ty.to_token_stream().to_string(),
@@ -323,7 +342,7 @@ impl SpecialRustType {
     /// Check if this type is equivalent to or contains `ty` in one of its generic parameters.
     pub fn contains_type(&self, ty: &str) -> bool {
         match &self {
-            Self::Vec(rty) | Self::Option(rty) => rty.contains_type(ty),
+            Self::Vec(rty) | Self::Array(rty, _) | Self::Option(rty) => rty.contains_type(ty),
             Self::HashMap(rty1, rty2) => rty1.contains_type(ty) || rty2.contains_type(ty),
             Self::Unit
             | Self::String
@@ -352,6 +371,7 @@ impl SpecialRustType {
             Self::F64 => "f64",
             Self::F32 => "f32",
             Self::Vec(_) => "Vec",
+            Self::Array(_, _) => "[]",
             Self::Option(_) => "Option",
             Self::HashMap(_, _) => "HashMap",
             Self::String => "String",
@@ -374,7 +394,9 @@ impl SpecialRustType {
     /// if there are none.
     pub fn parameters(&self) -> Box<dyn Iterator<Item = &RustType> + '_> {
         match &self {
-            Self::Vec(rtype) | Self::Option(rtype) => Box::new(std::iter::once(rtype.as_ref())),
+            Self::Vec(rtype) | Self::Array(rtype, _) | Self::Option(rtype) => {
+                Box::new(std::iter::once(rtype.as_ref()))
+            }
             Self::HashMap(rtype1, rtype2) => {
                 Box::new([rtype1.as_ref(), rtype2.as_ref()].into_iter())
             }
@@ -400,7 +422,7 @@ impl SpecialRustType {
 }
 
 /// Parsed information about a Rust enum definition
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum RustEnum {
     /// A unit enum
     ///
@@ -450,7 +472,7 @@ impl RustEnum {
 }
 
 /// Enum information shared among different enum types
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct RustEnumShared {
     /// The enum's ident
     pub id: Id,
@@ -470,7 +492,7 @@ pub struct RustEnumShared {
 }
 
 /// Parsed information about a Rust enum variant
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum RustEnumVariant {
     /// A unit variant
     Unit(RustEnumVariantShared),
@@ -502,10 +524,23 @@ impl RustEnumVariant {
 }
 
 /// Variant information shared among different variant types
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct RustEnumVariantShared {
     /// The variant's ident
     pub id: Id,
     /// Comments applied to the variant
     pub comments: Vec<String>,
+}
+
+/// An enum that encapsulates units of code generation for Typeshare.
+/// Analogous to `syn::Item`, even though our variants are more limited.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq)]
+pub enum RustItem {
+    /// A `struct` definition
+    Struct(RustStruct),
+    /// An `enum` definition
+    Enum(RustEnum),
+    /// A `type` definition or newtype struct.
+    Alias(RustTypeAlias),
 }

@@ -143,6 +143,7 @@ macro_rules! language_instance {
     (kotlin {$($field:ident: $val:expr),* $(,)?}) => {
         #[allow(clippy::needless_update)]
         Box::new(typeshare_core::language::Kotlin {
+            no_version_header: true,
             $($field: $val,)*
             ..Default::default()
         })
@@ -161,6 +162,7 @@ macro_rules! language_instance {
     (scala {$($field:ident: $val:expr),* $(,)?}) => {
         #[allow(clippy::needless_update)]
         Box::new(typeshare_core::language::Scala {
+            no_version_header: true,
             $($field: $val,)*
             ..Default::default()
         })
@@ -175,6 +177,7 @@ macro_rules! language_instance {
     (swift {$($field:ident: $val:expr),* $(,)?}) => {
         #[allow(clippy::needless_update)]
         Box::new(typeshare_core::language::Swift {
+            no_version_header: true,
             $($field: $val,)*
             ..Default::default()
         })
@@ -189,6 +192,7 @@ macro_rules! language_instance {
     (typescript {$($field:ident: $val:expr),* $(,)?}) => {
         #[allow(clippy::needless_update)]
         Box::new(typeshare_core::language::TypeScript {
+            no_version_header: true,
             $($field: $val,)*
             ..Default::default()
         })
@@ -204,6 +208,7 @@ macro_rules! language_instance {
         #[allow(clippy::needless_update)]
         Box::new(typeshare_core::language::Go {
              package: "proto".to_string(),
+             no_version_header: true,
              $($field: $val,)*
             ..Default::default()
         })
@@ -397,11 +402,14 @@ tests! {
         typescript,
         go
     ];
-    can_generate_bare_string_enum: [swift, kotlin, scala, typescript];
+    can_generate_bare_string_enum: [swift, kotlin, scala, typescript, go ];
     can_generate_double_option_pattern: [
         typescript
     ];
-    test_simple_enum_case_name_support: [swift, kotlin, scala, typescript];
+    can_recognize_types_inside_modules: [
+        swift, kotlin, scala, typescript, go
+    ];
+    test_simple_enum_case_name_support: [swift, kotlin, scala, typescript, go ];
     test_algebraic_enum_case_name_support: [
         swift {
             prefix: "OP".to_string(),
@@ -449,6 +457,7 @@ tests! {
     // TODO: kotlin and typescript don't appear to support this yet
     generates_empty_structs_and_initializers: [swift, kotlin, scala, typescript, go];
     test_default_decorators: [swift { default_decorators: vec!["Sendable".into(), "Identifiable".into()]}];
+    test_default_generic_constraints: [swift { default_generic_constraints: typeshare_core::language::GenericConstraints::from_config(vec!["Sendable".into(), "Identifiable".into()]) }];
     test_i54_u53_type: [swift, kotlin, scala,  typescript, go];
     test_serde_default_struct: [swift, kotlin, scala,  typescript, go];
     test_serde_iso8601: [
@@ -498,7 +507,7 @@ tests! {
     ];
     test_type_alias: [ swift { prefix: "OP".to_string(), }, kotlin, scala,  typescript, go ];
     test_optional_type_alias: [swift, kotlin, scala, typescript, go];
-    test_serialized_as: [ swift { prefix: "OP".to_string(), }, kotlin, scala,  typescript];
+    test_serialized_as: [ swift { prefix: "OP".to_string(), }, kotlin, scala,  typescript, go ];
     test_serialized_as_tuple: [
         swift {
             prefix: "OP".to_string(),
@@ -514,6 +523,9 @@ tests! {
     can_handle_serde_rename_on_top_level: [swift { prefix: "OP".to_string(), }, kotlin, scala,  typescript, go];
     can_generate_unit_structs: [swift, kotlin, scala, typescript, go];
     kebab_case_rename: [swift, kotlin, scala,  typescript, go];
+
+    /// Globals get topologically sorted
+    orders_types: [swift, kotlin, go];
 
     /// Other
     use_correct_integer_types: [swift, kotlin, scala,  typescript, go];

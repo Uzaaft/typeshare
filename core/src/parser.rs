@@ -2,7 +2,7 @@ use crate::{
     language::SupportedLanguage,
     rename::RenameExt,
     rust_types::{
-        Id, RustEnum, RustEnumShared, RustEnumVariant, RustEnumVariantShared, RustField,
+        Id, RustEnum, RustEnumShared, RustEnumVariant, RustEnumVariantShared, RustField, RustItem,
         RustStruct, RustType, RustTypeAlias, RustTypeParseError,
     },
 };
@@ -40,11 +40,11 @@ impl ParsedData {
         self.aliases.append(&mut other.aliases);
     }
 
-    fn push_rust_thing(&mut self, rust_thing: RustThing) {
+    fn push_rust_thing(&mut self, rust_thing: RustItem) {
         match rust_thing {
-            RustThing::Struct(s) => self.structs.push(s),
-            RustThing::Enum(e) => self.enums.push(e),
-            RustThing::Alias(a) => self.aliases.push(a),
+            RustItem::Struct(s) => self.structs.push(s),
+            RustItem::Enum(e) => self.enums.push(e),
+            RustItem::Alias(a) => self.aliases.push(a),
         }
     }
 }
@@ -73,6 +73,8 @@ pub enum ParseError {
     SerdeTagRequired { enum_ident: String },
     #[error("serde content attribute needs to be specified for algebraic enum {enum_ident}. e.g. #[serde(tag = \"type\", content = \"content\")]")]
     SerdeContentRequired { enum_ident: String },
+    #[error("the serde flatten attribute is not currently supported")]
+    SerdeFlattenNotAllowed,
 }
 
 /// Parse the given Rust source string into `ParsedData`.
@@ -88,7 +90,8 @@ pub fn parse(input: &str) -> Result<ParsedData, ParseError> {
     // Parse and process the input, ensuring we parse only items marked with
     // `#[typeshare]
     let source = syn::parse_file(input)?;
-    for item in &source.items {
+
+    for item in flatten_items(source.items.iter()) {
         match item {
             syn::Item::Struct(s) if has_typeshare_annotation(&s.attrs) => {
                 parsed_data.push_rust_thing(parse_struct(s)?);
@@ -106,12 +109,21 @@ pub fn parse(input: &str) -> Result<ParsedData, ParseError> {
     Ok(parsed_data)
 }
 
-/// Allows parsing functions to return different things.
-// TODO: this exists to allow for hacks in the code below, remove this
-enum RustThing {
-    Struct(RustStruct),
-    Enum(RustEnum),
-    Alias(RustTypeAlias),
+/// Given an iterator over items, will return an iterator that flattens the contents of embedded
+/// module items into the iterator.
+fn flatten_items<'a>(
+    items: impl Iterator<Item = &'a syn::Item>,
+) -> impl Iterator<Item = &'a syn::Item> {
+    items.flat_map(|item| {
+        match item {
+            syn::Item::Mod(syn::ItemMod {
+                content: Some((_, items)),
+                ..
+            }) => flatten_items(items.iter()).collect(),
+            item => vec![item],
+        }
+        .into_iter()
+    })
 }
 
 /// Parses a struct into a definition that more succinctly represents what
@@ -119,7 +131,7 @@ enum RustThing {
 ///
 /// This function can currently return something other than a struct, which is a
 /// hack.
-fn parse_struct(s: &ItemStruct) -> Result<RustThing, ParseError> {
+fn parse_struct(s: &ItemStruct) -> Result<RustItem, ParseError> {
     let serde_rename_all = serde_rename_all(&s.attrs);
 
     let generic_types = s
@@ -136,7 +148,7 @@ fn parse_struct(s: &ItemStruct) -> Result<RustThing, ParseError> {
     // TODO: we shouldn't lie and return a type alias when parsing a struct. this
     // is a temporary hack
     if let Some(ty) = get_serialized_as_type(&s.attrs) {
-        return Ok(RustThing::Alias(RustTypeAlias {
+        return Ok(RustItem::Alias(RustTypeAlias {
             id: get_ident(Some(&s.ident), &s.attrs, &None),
             r#type: ty.parse()?,
             comments: parse_comment_attrs(&s.attrs),
@@ -158,6 +170,10 @@ fn parse_struct(s: &ItemStruct) -> Result<RustThing, ParseError> {
                         RustType::try_from(&f.ty)?
                     };
 
+                    if serde_flatten(&f.attrs) {
+                        return Err(ParseError::SerdeFlattenNotAllowed);
+                    }
+
                     let has_default = serde_default(&f.attrs);
                     let decorators = get_field_decorators(&f.attrs);
 
@@ -171,7 +187,7 @@ fn parse_struct(s: &ItemStruct) -> Result<RustThing, ParseError> {
                 })
                 .collect::<Result<_, ParseError>>()?;
 
-            RustThing::Struct(RustStruct {
+            RustItem::Struct(RustStruct {
                 id: get_ident(Some(&s.ident), &s.attrs, &None),
                 generic_types,
                 fields,
@@ -192,7 +208,7 @@ fn parse_struct(s: &ItemStruct) -> Result<RustThing, ParseError> {
                 RustType::try_from(&f.ty)?
             };
 
-            RustThing::Alias(RustTypeAlias {
+            RustItem::Alias(RustTypeAlias {
                 id: get_ident(Some(&s.ident), &s.attrs, &None),
                 r#type: ty,
                 comments: parse_comment_attrs(&s.attrs),
@@ -200,7 +216,7 @@ fn parse_struct(s: &ItemStruct) -> Result<RustThing, ParseError> {
             })
         }
         // Unit structs or `None`
-        Fields::Unit => RustThing::Struct(RustStruct {
+        Fields::Unit => RustItem::Struct(RustStruct {
             id: get_ident(Some(&s.ident), &s.attrs, &None),
             generic_types,
             fields: vec![],
@@ -215,7 +231,7 @@ fn parse_struct(s: &ItemStruct) -> Result<RustThing, ParseError> {
 ///
 /// This function can currently return something other than an enum, which is a
 /// hack.
-fn parse_enum(e: &ItemEnum) -> Result<RustThing, ParseError> {
+fn parse_enum(e: &ItemEnum) -> Result<RustItem, ParseError> {
     let generic_types = e
         .generics
         .params
@@ -231,7 +247,7 @@ fn parse_enum(e: &ItemEnum) -> Result<RustThing, ParseError> {
     // TODO: we shouldn't lie and return a type alias when parsing an enum. this
     // is a temporary hack
     if let Some(ty) = get_serialized_as_type(&e.attrs) {
-        return Ok(RustThing::Alias(RustTypeAlias {
+        return Ok(RustItem::Alias(RustTypeAlias {
             id: get_ident(Some(&e.ident), &e.attrs, &None),
             r#type: ty.parse()?,
             comments: parse_comment_attrs(&e.attrs),
@@ -291,7 +307,7 @@ fn parse_enum(e: &ItemEnum) -> Result<RustThing, ParseError> {
             });
         }
 
-        Ok(RustThing::Enum(RustEnum::Unit(shared)))
+        Ok(RustItem::Enum(RustEnum::Unit(shared)))
     } else {
         // At least one enum variant is either a tuple or an anonymous struct
 
@@ -302,7 +318,7 @@ fn parse_enum(e: &ItemEnum) -> Result<RustThing, ParseError> {
             enum_ident: original_enum_ident.clone(),
         })?;
 
-        Ok(RustThing::Enum(RustEnum::Algebraic {
+        Ok(RustItem::Enum(RustEnum::Algebraic {
             tag_key,
             content_key,
             shared,
@@ -635,14 +651,12 @@ fn serde_rename_all(attrs: &[syn::Attribute]) -> Option<String> {
         .and_then(literal_as_string)
 }
 
-fn serde_default(attrs: &[syn::Attribute]) -> bool {
-    let default = Ident::new("default", Span::call_site());
-
+fn serde_attr(attrs: &[syn::Attribute], ident: &Ident) -> bool {
     attrs.iter().any(|attr| {
         get_serde_meta_items(attr).iter().any(|arg| match arg {
             NestedMeta::Meta(Meta::Path(path)) => {
-                if let Some(ident) = path.get_ident() {
-                    *ident == default
+                if let Some(this_ident) = path.get_ident() {
+                    *this_ident == *ident
                 } else {
                     false
                 }
@@ -650,6 +664,14 @@ fn serde_default(attrs: &[syn::Attribute]) -> bool {
             _ => false,
         })
     })
+}
+
+fn serde_default(attrs: &[syn::Attribute]) -> bool {
+    serde_attr(attrs, &Ident::new("default", Span::call_site()))
+}
+
+fn serde_flatten(attrs: &[syn::Attribute]) -> bool {
+    serde_attr(attrs, &Ident::new("flatten", Span::call_site()))
 }
 
 // TODO: for now, this is a workaround until we can integrate serde_derive_internal

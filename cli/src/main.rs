@@ -8,6 +8,7 @@ use ignore::types::TypesBuilder;
 use ignore::WalkBuilder;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use std::{fs, path::Path};
+use typeshare_core::language::GenericConstraints;
 #[cfg(feature = "go")]
 use typeshare_core::language::Go;
 use typeshare_core::{
@@ -184,26 +185,33 @@ fn main() {
             prefix: config.swift.prefix,
             type_mappings: config.swift.type_mappings,
             default_decorators: config.swift.default_decorators,
+            default_generic_constraints: GenericConstraints::from_config(
+                config.swift.default_generic_constraints,
+            ),
             ..Default::default()
         }),
         Some(SupportedLanguage::Kotlin) => Box::new(Kotlin {
             package: config.kotlin.package,
             module_name: config.kotlin.module_name,
             type_mappings: config.kotlin.type_mappings,
+            ..Default::default()
         }),
         Some(SupportedLanguage::Scala) => Box::new(Scala {
             package: config.scala.package,
             module_name: config.scala.module_name,
             type_mappings: config.scala.type_mappings,
+            ..Default::default()
         }),
         Some(SupportedLanguage::TypeScript) => Box::new(TypeScript {
             type_mappings: config.typescript.type_mappings,
+            ..Default::default()
         }),
         #[cfg(feature = "go")]
         Some(SupportedLanguage::Go) => Box::new(Go {
             package: config.go.package,
             type_mappings: config.go.type_mappings,
             uppercase_acronyms: config.go.uppercase_acronyms,
+            ..Default::default()
         }),
         #[cfg(not(feature = "go"))]
         Some(SupportedLanguage::Go) => {
