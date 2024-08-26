@@ -1,3 +1,4 @@
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -14,6 +15,7 @@ const DEFAULT_CONFIG_FILE_NAME: &str = "typeshare.toml";
 pub struct KotlinParams {
     pub package: String,
     pub module_name: String,
+    pub prefix: String,
     pub type_mappings: HashMap<String, String>,
 }
 
@@ -32,6 +34,8 @@ pub struct SwiftParams {
     pub type_mappings: HashMap<String, String>,
     pub default_decorators: Vec<String>,
     pub default_generic_constraints: Vec<String>,
+    /// The contraints to apply to `CodableVoid`.
+    pub codablevoid_constraints: Vec<String>,
 }
 
 #[derive(Default, Serialize, Deserialize, PartialEq, Eq, Debug)]
@@ -60,19 +64,19 @@ pub(crate) struct Config {
     pub scala: ScalaParams,
     #[cfg(feature = "go")]
     pub go: GoParams,
+    #[serde(skip)]
+    pub target_os: Vec<String>,
 }
 
-pub(crate) fn store_config(config: &Config, file_path: Option<&str>) -> Result<(), io::Error> {
+pub(crate) fn store_config(config: &Config, file_path: Option<&str>) -> anyhow::Result<()> {
     let file_path = file_path.unwrap_or(DEFAULT_CONFIG_FILE_NAME);
+    let config_output = toml::to_string_pretty(config).context("Failed to serialize to toml")?;
 
     // Fail if trying to overwrite an existing config file
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(file_path)?;
-
-    let config_output =
-        toml::to_string_pretty(config).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
     file.write_all(config_output.as_bytes())?;
 

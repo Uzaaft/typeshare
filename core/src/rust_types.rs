@@ -1,11 +1,16 @@
 use quote::ToTokens;
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 use std::str::FromStr;
 use std::{collections::HashMap, convert::TryFrom};
-use syn::{Expr, ExprLit, Lit, TypeArray};
+use syn::{Expr, ExprLit, Lit, TypeArray, TypeSlice};
 use thiserror::Error;
 
 use crate::language::SupportedLanguage;
+use crate::parser::DecoratorKind;
+use crate::visitors::accept_type;
+
+/// Type level typeshare attributes are mapped by target language and a mapping of attribute.
+pub type DecoratorMap = HashMap<DecoratorKind, BTreeSet<String>>;
 
 /// Identifier used in Rust structs, enums, and fields. It includes the `original` name and the `renamed` value after the transformation based on `serde` attributes.
 #[derive(Debug, Clone, PartialEq)]
@@ -29,7 +34,7 @@ impl std::fmt::Display for Id {
 }
 
 /// Rust struct.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct RustStruct {
     /// The identifier for the struct.
     pub id: Id,
@@ -42,14 +47,36 @@ pub struct RustStruct {
     /// so we need to collect them here.
     pub comments: Vec<String>,
     /// Attributes that exist for this struct.
-    pub decorators: HashMap<SupportedLanguage, Vec<String>>,
+    pub decorators: DecoratorMap,
+    /// True if this struct contains data that needs to be redacted
+    pub is_redacted: bool,
+}
+
+impl PartialEq for RustStruct {
+    fn eq(&self, other: &Self) -> bool {
+        self.id.original == other.id.original
+    }
+}
+
+impl Eq for RustStruct {}
+
+impl PartialOrd for RustStruct {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for RustStruct {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.id.original.cmp(&other.id.original)
+    }
 }
 
 /// Rust type alias.
 /// ```
 /// pub struct MasterPassword(String);
 /// ```
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct RustTypeAlias {
     /// The identifier for the alias.
     pub id: Id,
@@ -59,6 +86,30 @@ pub struct RustTypeAlias {
     pub r#type: RustType,
     /// Comments that were in the type alias source.
     pub comments: Vec<String>,
+    /// Attributes that exist for this struct.
+    pub decorators: DecoratorMap,
+    /// True if this type alias contains data that needs to be redacted
+    pub is_redacted: bool,
+}
+
+impl PartialEq for RustTypeAlias {
+    fn eq(&self, other: &Self) -> bool {
+        self.id.original == other.id.original
+    }
+}
+
+impl Eq for RustTypeAlias {}
+
+impl Ord for RustTypeAlias {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.id.original.cmp(&other.id.original)
+    }
+}
+
+impl PartialOrd for RustTypeAlias {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 /// Rust field definition.
@@ -75,8 +126,26 @@ pub struct RustField {
     /// for the languages we generate code for.
     pub has_default: bool,
     /// Language-specific decorators assigned to a given field.
-    /// The keys are language names (e.g. SupportedLanguage::TypeScript), the values are decorators (e.g. readonly)
-    pub decorators: HashMap<SupportedLanguage, HashSet<String>>,
+    /// The keys are language names (e.g. SupportedLanguage::TypeScript), the values are field decorators (e.g. readonly)
+    pub decorators: HashMap<SupportedLanguage, BTreeSet<FieldDecorator>>,
+}
+
+/// A single decorator on a field in Rust code.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum FieldDecorator {
+    /// A boolean flag enabled by its existence as a decorator: for example, `readonly`.
+    Word(String),
+    /// A key-value pair, such as `type = "any"`.
+    NameValue(String, String),
+}
+
+impl FieldDecorator {
+    /// Returns the name of the field decorator. For a word decorator, this is just the identifier.
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Word(name) | Self::NameValue(name, _) => name,
+        }
+    }
 }
 
 /// A Rust type.
@@ -87,6 +156,7 @@ pub enum RustType {
     /// - `SomeStruct<String>`
     /// - `SomeEnum<u32>`
     /// - `SomeTypeAlias<(), &str>`
+    ///
     /// However, there are some generic types that are considered to be _special_. These
     /// include `Vec<T>` `HashMap<K, V>`, and `Option<T>`, which are part of `SpecialRustType` instead
     /// of `RustType::Generic`.
@@ -117,6 +187,8 @@ pub enum SpecialRustType {
     Vec(Box<RustType>),
     /// Represents `[T; N]` from the standard library
     Array(Box<RustType>, usize),
+    /// Represents `&[T]` from the standard library
+    Slice(Box<RustType>),
     /// Represents `HashMap<K, V>` from the standard library
     HashMap(Box<RustType>, Box<RustType>),
     /// Represents `Option<T>` from the standard library
@@ -125,6 +197,8 @@ pub enum SpecialRustType {
     Unit,
     /// Represents `String` from the standard library
     String,
+    /// Represents `char`
+    Char,
     /// Represents `i8`
     I8,
     /// Represents `i16`
@@ -222,10 +296,12 @@ impl TryFrom<&syn::Type> for RustType {
                         ))
                     }
                     "str" | "String" => Self::Special(SpecialRustType::String),
-                    // Since we do not need to box types in other languages, we treat this type
-                    // as its inner type.
-                    "Box" => parameters.into_iter().next().unwrap(),
+                    // These smart pointers can be treated as their inner type since serde can handle it
+                    // See impls of serde::Deserialize
+                    "Box" | "Weak" | "Arc" | "Rc" | "Cow" | "ArcWeak" | "RcWeak" | "Cell"
+                    | "Mutex" | "RefCell" | "RwLock" => parameters.into_iter().next().unwrap(),
                     "bool" => Self::Special(SpecialRustType::Bool),
+                    "char" => Self::Special(SpecialRustType::Char),
                     "u8" => Self::Special(SpecialRustType::U8),
                     "u16" => Self::Special(SpecialRustType::U16),
                     "u32" => Self::Special(SpecialRustType::U32),
@@ -262,6 +338,12 @@ impl TryFrom<&syn::Type> for RustType {
                 count
                     .base10_parse()
                     .map_err(RustTypeParseError::NumericLiteral)?,
+            )),
+            syn::Type::Slice(TypeSlice {
+                bracket_token: _,
+                elem,
+            }) => Self::Special(SpecialRustType::Slice(
+                Self::try_from(elem.as_ref())?.into(),
             )),
             _ => {
                 return Err(RustTypeParseError::UnexpectedToken(
@@ -327,6 +409,51 @@ impl RustType {
             Self::Special(special) => special.parameters(),
         }
     }
+
+    /// Yield all the type names including nested generic types.
+    pub fn all_reference_type_names(&self) -> impl Iterator<Item = &'_ str> + '_ {
+        RustRefTypeIter {
+            ty: Some(self),
+            parameters: Vec::new(),
+        }
+        .filter(|s| accept_type(s))
+    }
+}
+
+struct RustRefTypeIter<'a> {
+    ty: Option<&'a RustType>,
+    parameters: Vec<&'a RustType>,
+}
+
+impl<'a> Iterator for RustRefTypeIter<'a> {
+    type Item = &'a str;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(t) = self.parameters.pop() {
+            self.parameters.extend(t.parameters());
+            return Some(t.id());
+        }
+
+        if let Some(t) = self.ty.take() {
+            self.parameters = t.parameters().collect();
+            return Some(t.id());
+        }
+
+        None
+    }
+}
+
+impl RustField {
+    /// Returns an type override, if it exists, on this field for a given language.
+    pub fn type_override(&self, language: SupportedLanguage) -> Option<&str> {
+        self.decorators
+            .get(&language)?
+            .iter()
+            .find_map(|fd| match fd {
+                FieldDecorator::NameValue(name, ty) if name == "type" => Some(ty.as_str()),
+                _ => None,
+            })
+    }
 }
 
 #[derive(Debug, Error)]
@@ -342,10 +469,13 @@ impl SpecialRustType {
     /// Check if this type is equivalent to or contains `ty` in one of its generic parameters.
     pub fn contains_type(&self, ty: &str) -> bool {
         match &self {
-            Self::Vec(rty) | Self::Array(rty, _) | Self::Option(rty) => rty.contains_type(ty),
+            Self::Vec(rty) | Self::Array(rty, _) | Self::Slice(rty) | Self::Option(rty) => {
+                rty.contains_type(ty)
+            }
             Self::HashMap(rty1, rty2) => rty1.contains_type(ty) || rty2.contains_type(ty),
             Self::Unit
             | Self::String
+            | Self::Char
             | Self::I8
             | Self::I16
             | Self::I32
@@ -372,9 +502,11 @@ impl SpecialRustType {
             Self::F32 => "f32",
             Self::Vec(_) => "Vec",
             Self::Array(_, _) => "[]",
+            Self::Slice(_) => "&[]",
             Self::Option(_) => "Option",
             Self::HashMap(_, _) => "HashMap",
             Self::String => "String",
+            Self::Char => "char",
             Self::Bool => "bool",
             Self::I8 => "i8",
             Self::I16 => "i16",
@@ -394,7 +526,7 @@ impl SpecialRustType {
     /// if there are none.
     pub fn parameters(&self) -> Box<dyn Iterator<Item = &RustType> + '_> {
         match &self {
-            Self::Vec(rtype) | Self::Array(rtype, _) | Self::Option(rtype) => {
+            Self::Vec(rtype) | Self::Array(rtype, _) | Self::Slice(rtype) | Self::Option(rtype) => {
                 Box::new(std::iter::once(rtype.as_ref()))
             }
             Self::HashMap(rtype1, rtype2) => {
@@ -402,6 +534,7 @@ impl SpecialRustType {
             }
             Self::Unit
             | Self::String
+            | Self::Char
             | Self::I8
             | Self::I16
             | Self::I32
@@ -422,7 +555,7 @@ impl SpecialRustType {
 }
 
 /// Parsed information about a Rust enum definition
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum RustEnum {
     /// A unit enum
     ///
@@ -462,6 +595,26 @@ pub enum RustEnum {
     },
 }
 
+impl PartialEq for RustEnum {
+    fn eq(&self, other: &Self) -> bool {
+        self.shared().id.original == other.shared().id.original
+    }
+}
+
+impl Eq for RustEnum {}
+
+impl PartialOrd for RustEnum {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for RustEnum {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.shared().id.original.cmp(&other.shared().id.original)
+    }
+}
+
 impl RustEnum {
     /// Get a reference to the inner shared content
     pub fn shared(&self) -> &RustEnumShared {
@@ -485,10 +638,12 @@ pub struct RustEnumShared {
     /// Decorators applied to the enum for generation in other languages
     ///
     /// Example: `#[typeshare(swift = "Equatable, Comparable, Hashable")]`.
-    pub decorators: HashMap<SupportedLanguage, Vec<String>>,
+    pub decorators: DecoratorMap,
     /// True if this enum references itself in any field of any variant
     /// Swift needs the special keyword `indirect` for this case
     pub is_recursive: bool,
+    /// True if this enum contains data that needs to be redacted
+    pub is_redacted: bool,
 }
 
 /// Parsed information about a Rust enum variant
